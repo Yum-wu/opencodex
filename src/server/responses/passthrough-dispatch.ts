@@ -102,6 +102,7 @@ import {
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
   TRANSIENT_RETRY_MAX_ATTEMPTS,
+  type UpstreamSendRecovery,
   prepareSameTarget429Wait,
   sleepWithAbort,
 } from "../../lib/upstream-retry";
@@ -165,6 +166,8 @@ export async function preparePassthroughExchange(
     | "genericFailoverAccountId"
     | "passiveQuotaWriterGeneration"
     | "oauthDispatch"
+    | "selectionIsCurrent"
+    | "requestBindings"
     | "resolveSelectionAdapter"
     | "isOAuth401ReplayProvider"
     | "sentOAuthSnapshot"
@@ -1444,6 +1447,35 @@ export async function preparePassthroughExchange(
     break;
     }
 
+  // Delivery may request one zero-byte HTTP recovery, never a fresh retry allowance.
+  const refetchZeroOutput = (_recovery?: UpstreamSendRecovery, signal: AbortSignal = upstream.signal): Promise<Response> =>
+    fetchWithTransientRetry(() => fetchWithHeaderTimeout(
+      request.url,
+      applyUpstreamRecoveryInit({ method: request.method, headers: request.headers, body: request.body }, "connection-reset"),
+      signal, connectMs, true,
+      providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+        httpOnly: true,
+        providerName: route.providerName, modelId: route.modelId,
+        dispatchOverride: oauthDispatch(request),
+        beforeDispatch: headers => {
+          if (signal.aborted) throw signal.reason;
+          if (!transportState.selectionIsCurrent(transportState.requestBindings.get(request))) {
+            throw new Error("Credential selection changed before zero-output recovery");
+          }
+          if (isCanonicalOpenAiForwardProvider(route.provider)) {
+            createCodexReserveDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config,
+              route.modelId, options.admission, options.visionDescribeTerminal === true)?.(headers);
+          }
+          noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, "connection-reset");
+        },
+      }),
+      route.provider.authMode === "forward",
+    ).then(adoptObservedResponse), {
+      abortSignal: signal, label: safeHostLabel(request.url),
+      attempts: Math.min(1, remainingTransientSendBudget(TRANSIENT_RETRY_MAX_ATTEMPTS)),
+      onSendsConsumed: noteTransientSends,
+    });
+
   return {
     codexSafetyBufferingOptions,
     imageGenCallAliases,
@@ -1482,6 +1514,7 @@ export async function preparePassthroughExchange(
     upstream,
     connectMs,
     upstreamResponse,
+    refetchZeroOutput,
   };
 }
 

@@ -42,7 +42,8 @@ import {
   createPassthroughWebSearchBridgeStream,
   createPassthroughWebSearchBridgeExecutor,
 } from "../../web-search/passthrough-bridge";
-import { fetchWithHeaderTimeout, providerFetch } from "./fetch-helpers";
+import { fetchWithHeaderTimeout, providerFetch, safeHostLabel } from "./fetch-helpers";
+import { isNonReplayableResponse, wrapWithZeroOutputRefetch } from "../../lib/upstream-retry";
 import { providerApiKeySelectionIsCurrent } from "../../providers/api-key-selection";
 import { requiresVisionPreprocessing } from "../../vision";
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
@@ -133,6 +134,7 @@ export async function deliverPassthroughResponse(
   nativeExchange: Pick<
     PassthroughExchange,
     | "upstreamResponse"
+    | "refetchZeroOutput"
     | "codexSafetyBufferingOptions"
     | "upstream"
     | "request"
@@ -346,10 +348,21 @@ export async function deliverPassthroughResponse(
       const webSearchBridgeBinding = requestBindings.get(nativeExchange.request);
       // The bridge wraps the RAW upstream body, so terminal repair below still owns the single
       // client-facing terminal — the bridge drops the terminal of every intercepted leg.
+      // Preserve the original HTTP-byte boundary before rewriting or hosted-search work.
+      // A sent WebSocket exchange must not replay even when no SSE bytes were delivered.
+      const rawBody = !isCodexWsUpstreamResponse(upstreamResponse) && !isNonReplayableResponse(upstreamResponse)
+        ? wrapWithZeroOutputRefetch(upstreamResponse.body, nativeExchange.refetchZeroOutput, {
+          abortSignal: upstream.signal, label: safeHostLabel(nativeExchange.request.url),
+          acceptResponse: replacement => {
+            const type = replacement.headers.get("content-type")?.toLowerCase();
+            return type?.includes("text/event-stream") === true || (!type && !passthroughCt);
+          },
+        })
+        : upstreamResponse.body;
       const upstreamSseBody = webSearchBridgePlan
         ? createPassthroughWebSearchBridgeStream({
           plan: webSearchBridgePlan,
-          firstLeg: upstreamResponse.body,
+          firstLeg: rawBody,
           requestBody: nativeExchange.request.body,
           // Continuation legs replay the same built request with the executed search appended.
           // The first leg already passed the recovery ladder, the outbound size ceiling, and the
@@ -389,7 +402,7 @@ export async function deliverPassthroughResponse(
           },
           signal: upstream.signal,
         })
-        : upstreamResponse.body;
+        : rawBody;
       const passthroughSseBody = terminalRepairPolicy
         ? relayResponsesSseWithTerminalRepair(
           upstreamSseBody,

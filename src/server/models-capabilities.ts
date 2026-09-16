@@ -10,6 +10,10 @@ import type { CursorEffortTable } from "../integrations/cursor-effort-table";
  * Completions, Responses and Anthropic Messages, streams, and accepts tool calls, so those are
  * constants; context length and vision come from catalog data when known and are omitted
  * otherwise, matching Cursor's optional-field schema.
+ *
+ * Top-level capacity metrics (`context_window`, `context_length`, `max_output_tokens`) are
+ * mirrored directly on each model row for external client discovery (e.g. pi-ai, DSH,
+ * LibreChat) that inspects flat properties rather than Cursor's nested `capabilities.*` shape.
  */
 
 /**
@@ -138,6 +142,10 @@ export interface ModelCapabilityFields {
    */
   context_window?: number;
   /**
+   * Top-level context length alias matching capabilities.context_length for clients expecting context_length.
+   */
+  context_length?: number;
+  /**
    * Mirrored top-level max output token limit for external/legacy client discovery.
    */
   max_output_tokens?: number;
@@ -182,8 +190,11 @@ export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabil
       ...(supportsVision !== undefined ? { supports_vision: supportsVision } : {}),
       ...(efforts.length > 0 ? { reasoning_effort: [...efforts] } : {}),
     },
-    ...(effectiveContextLength !== undefined ? { context_window: effectiveContextLength } : {}),
+    ...(effectiveContextLength !== undefined
+      ? { context_window: effectiveContextLength, context_length: effectiveContextLength }
+      : {}),
     ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
     ...(hasLongTier ? { pricing: { overrides: [{ min_prompt_tokens: contextLength }] } } : {}),
   };
 }
+

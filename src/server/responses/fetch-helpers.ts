@@ -55,7 +55,10 @@ export function wantsFreshConnection(
   try {
     const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const host = new URL(rawUrl).hostname.toLowerCase();
-    const targets = hostsEnv.split(",").map(h => h.trim().toLowerCase()).filter(Boolean);
+    const targets = hostsEnv
+      .split(",")
+      .map(h => h.trim().toLowerCase().replace(/^\.+/, ""))
+      .filter(Boolean);
     for (const target of targets) {
       if (host === target || host.endsWith(`.${target}`)) return true;
     }
@@ -107,10 +110,10 @@ export function providerFetch(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
       const fresh = wantsFreshConnection(input);
-      if (fresh && !headers.has("Connection")) {
+      options.beforeDispatch?.(headers);
+      if (fresh) {
         headers.set("Connection", "close");
       }
-      options.beforeDispatch?.(headers);
       const versioned = withUpstreamHttpVersion(input, init, provider);
       const dispatchInit = {
         ...versioned,
@@ -244,3 +247,4 @@ export async function fetchWithHeaderTimeout(
     clearTimeout(timer);
   }
 }
+

@@ -123,6 +123,18 @@ describe("modelCapabilityFields", () => {
     expect(modelCapabilityFields({ maxOutputTokens: 1.9 }).capabilities.supports_reasoning)
       .toBe(false);
   });
+
+  test("mirrors top-level context_window and max_output_tokens for external and legacy client discovery", () => {
+    const fields = modelCapabilityFields({ contextWindow: 200000, maxOutputTokens: 64000 });
+    expect(fields.context_window).toBe(200000);
+    expect(fields.max_output_tokens).toBe(64000);
+    expect(fields.capabilities.context_length).toBe(200000);
+    expect(fields.capabilities.max_output_tokens).toBe(64000);
+
+    const empty = modelCapabilityFields({});
+    expect("context_window" in empty).toBe(false);
+    expect("max_output_tokens" in empty).toBe(false);
+  });
 });
 
 describe("nativeOpenAiContextTier", () => {

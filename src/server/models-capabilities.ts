@@ -133,6 +133,15 @@ export interface ModelCapabilityFields {
     reasoning_effort?: string[];
   };
   /**
+   * Mirrored top-level context window for external/legacy client discovery (e.g. pi-ai, DSH)
+   * that reads top-level context_window / context_length instead of nested capabilities.
+   */
+  context_window?: number;
+  /**
+   * Mirrored top-level max output token limit for external/legacy client discovery.
+   */
+  max_output_tokens?: number;
+  /**
    * Cursor reads the long-context threshold from `pricing.overrides[].min_prompt_tokens`. That
    * key sits outside its validated capability schema, so it is the one place a threshold can
    * be carried without failing row validation (`cost.long_context` is rejected by that schema).
@@ -153,6 +162,7 @@ export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabil
   const longContextLength = positiveInt(input.longContextWindow);
   const maxOutputTokens = positiveInt(input.maxOutputTokens);
   const hasLongTier = contextLength !== undefined && longContextLength !== undefined && longContextLength > contextLength;
+  const effectiveContextLength = hasLongTier ? longContextLength : contextLength;
   const modalities = Array.isArray(input.inputModalities)
     ? input.inputModalities.filter(modality => typeof modality === "string" && modality.length > 0)
     : undefined;
@@ -160,9 +170,7 @@ export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabil
   return {
     api_types: [...OPENCODEX_MODEL_API_TYPES],
     capabilities: {
-      ...(hasLongTier
-        ? { context_length: longContextLength }
-        : contextLength !== undefined ? { context_length: contextLength } : {}),
+      ...(effectiveContextLength !== undefined ? { context_length: effectiveContextLength } : {}),
       ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
       // Once a gateway advertises api_types, Cursor keeps only rows whose output_modalities
       // include "text"; omitting the key drops the row from the extended catalog.
@@ -174,6 +182,8 @@ export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabil
       ...(supportsVision !== undefined ? { supports_vision: supportsVision } : {}),
       ...(efforts.length > 0 ? { reasoning_effort: [...efforts] } : {}),
     },
+    ...(effectiveContextLength !== undefined ? { context_window: effectiveContextLength } : {}),
+    ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
     ...(hasLongTier ? { pricing: { overrides: [{ min_prompt_tokens: contextLength }] } } : {}),
   };
 }

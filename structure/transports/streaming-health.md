@@ -252,3 +252,21 @@ Live sideband admission and its bounded upstream handshake follow the [runtime c
 The [explicit model-capability contract](../config.md#explicit-per-model-capability-declarations) preserves operator declarations through provider storage and catalog capture; it does not infer upstream capability or change this surface's routing behavior.
 
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
+
+## Zero-byte HTTP stream recovery
+
+`src/lib/upstream-retry.ts` can replace an HTTP stream once when its reader fails with a
+connection reset before the first raw response byte. Clean EOF, partial output, cancellation and
+other errors do not replay. A sent Codex WebSocket exchange or non-replayable response is excluded.
+`src/server/responses/passthrough-dispatch.ts` reuses the remaining request allowance and
+workflow accounting; `passthrough-delivery.ts` wraps the raw first leg before hosted-search,
+terminal repair or rewriting. Native Chat reuses its selected-key send path and configured
+transient policy. Both physical send boundaries recheck credential selection after pacing and
+use an HTTP-only executor; neither recovery selects a replacement account or grants a new budget.
+Cancellation aborts a pending refetch and discards a late body. Non-success, non-readable and
+content-type-incompatible replacements are cancelled without draining them into memory; the
+original stream error reaches the existing failed-tail handling. Request retention is released
+when replay becomes impossible. Zero observed bytes do not prove the origin did no work, so the
+additional request may be billable. This path is separate from the empty-completion opt-in.
+`tests/lib/upstream-retry-zero-output.test.ts` covers helper settlement, HTTP-only dispatch
+and the split-owner budget/credential wiring.

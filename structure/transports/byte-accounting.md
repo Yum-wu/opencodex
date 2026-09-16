@@ -41,3 +41,5 @@ Translated audio/file admission follows the [final-adapter input contract](../ad
 Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
 
 Upstream API-key usage follows the [physical-attempt account attribution contract](../gui-and-management-api.md#upstream-key-account-attribution), independently of subscription quota observations.
+
+During [zero-byte HTTP recovery](streaming-health.md#zero-byte-http-stream-recovery), native Chat retains request material only while replay remains possible. Rejected replacement bodies are cancelled, not accumulated with `arrayBuffer()`.

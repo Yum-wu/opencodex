@@ -384,3 +384,5 @@ Exact [model input declarations](config.md#explicit-per-model-capability-declara
 Provider-scoped approval reviewer settings are projected by the [catalog owner](catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
 
 Renamed fixed-key providers receive [missing reasoning metadata](catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.
+
+A child Responses request retains its parent workflow charge during [zero-byte HTTP recovery](transports/streaming-health.md#zero-byte-http-stream-recovery); the body wrapper cannot create a fresh fan-out allowance.

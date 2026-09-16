@@ -392,3 +392,5 @@ Exact [model input declarations](../config.md#explicit-per-model-capability-decl
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
 
 Renamed fixed-key providers receive [missing reasoning metadata](../catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.
+
+The zero-byte retry regression resides at `tests/lib/upstream-retry-zero-output.test.ts`, registered in both test-layout manifests. The [runtime contract](../transports/streaming-health.md#zero-byte-http-stream-recovery) distinguishes one HTTP replacement from a new retry budget.

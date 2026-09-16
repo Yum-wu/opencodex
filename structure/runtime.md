@@ -492,3 +492,5 @@ stamps the configured key selected for the physical request. `src/server/request
 retains per-key attempt usage, and `src/usage/log.ts` validates and persists labels. The
 [account attribution contract](gui-and-management-api.md#upstream-key-account-attribution)
 defines identity, unknown records, and aggregation boundaries.
+
+Native Chat and Responses retain physical-send credential admission during [zero-byte HTTP recovery](transports/streaming-health.md#zero-byte-http-stream-recovery); cancellation does not leave a replacement send running.

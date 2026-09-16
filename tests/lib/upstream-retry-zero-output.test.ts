@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
+import { repoPath } from "../helpers/repo-root";
+import { providerFetch } from "../../src/server/responses/fetch-helpers";
+import type { OcxProviderConfig } from "../../src/types";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   refetchOnZeroOutputReset,
   wrapWithZeroOutputRefetch,
-} from "../src/lib/upstream-retry";
+} from "../../src/lib/upstream-retry";
 
 function resetError(): Error {
   // Shape of Bun's fetch rejection on a stale pooled socket.
@@ -269,5 +273,104 @@ describe("wrapWithZeroOutputRefetch", () => {
     await reader.read();
     await reader.cancel("stop");
     expect(cancelled.length).toBe(1);
+  });
+});
+
+
+describe("zero-output rebase boundary regressions", () => {
+  test("cancellation aborts a pending refetch and disposes its late response", async () => {
+    silenceWarn();
+    const entered = Promise.withResolvers<void>();
+    const replacement = Promise.withResolvers<Response>();
+    const discarded = Promise.withResolvers<void>();
+    let signal: AbortSignal | undefined;
+    let releases = 0;
+    const reader = wrapWithZeroOutputRefetch(failingStream(resetError()), async (_recovery, nextSignal) => {
+      signal = nextSignal;
+      entered.resolve();
+      return replacement.promise;
+    }, { onReplayUnavailable: () => { releases++; } }).getReader();
+    const pending = reader.read();
+    await entered.promise;
+    await reader.cancel("stop");
+    expect(signal?.aborted).toBe(true);
+    replacement.resolve(new Response(new ReadableStream<Uint8Array>({
+      cancel() { discarded.resolve(); },
+    }, { highWaterMark: 0 })));
+    await discarded.promise;
+    expect((await pending).done).toBe(true);
+    expect(releases).toBe(1);
+  });
+
+  test("an error replacement is cancelled rather than drained", async () => {
+    silenceWarn();
+    let reads = 0;
+    let cancels = 0;
+    const replacement = new Response(new ReadableStream<Uint8Array>({
+      pull() { reads++; },
+      cancel() { cancels++; return new Promise<void>(() => {}); },
+    }, { highWaterMark: 0 }), { status: 503 });
+    expect(await refetchOnZeroOutputReset(async () => replacement, resetError())).toBeNull();
+    expect(reads).toBe(0);
+    expect(cancels).toBe(1);
+  });
+
+  test("a JSON replacement cannot enter a committed SSE response", async () => {
+    silenceWarn();
+    const replacement = Response.json({ error: "not an SSE stream" });
+    expect(await refetchOnZeroOutputReset(async () => replacement, resetError(), {
+      acceptResponse: response => response.headers.get("content-type") === "text/event-stream",
+    })).toBeNull();
+    expect(replacement.bodyUsed).toBe(true);
+  });
+
+  test("zero remaining allowance and clean EOF never refetch", async () => {
+    silenceWarn();
+    let calls = 0;
+    const execute = async () => { calls++; return new Response("unused"); };
+    await expect(collect(wrapWithZeroOutputRefetch(failingStream(resetError()), execute, { attempts: 0 })))
+      .rejects.toThrow(/socket connection was closed/i);
+    expect(await collect(wrapWithZeroOutputRefetch(streamOf([]), execute))).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  test("the HTTP-only executor retains physical-send hooks without dialing WebSocket", async () => {
+    const original = globalThis.WebSocket;
+    let dials = 0;
+    let sends = 0;
+    let admissions = 0;
+    let overrides = 0;
+    globalThis.WebSocket = class {
+      constructor() { dials++; throw new Error("HTTP recovery must not dial WebSocket"); }
+    } as unknown as typeof WebSocket;
+    try {
+      const provider = { fetch: (async () => { sends++; return new Response("ok"); }) as typeof fetch } as OcxProviderConfig;
+      const execute = providerFetch(provider, "1.4.0", {
+        httpOnly: true,
+        beforeDispatch: () => { admissions++; },
+        dispatchOverride: (input, init, send) => { overrides++; return send(input, init); },
+      });
+      const response = await execute("https://chatgpt.com/backend-api/codex/responses", {
+        method: "POST", body: JSON.stringify({ model: "fixture", stream: true }),
+      });
+      expect(await response.text()).toBe("ok");
+      expect({ dials, sends, admissions, overrides }).toEqual({ dials: 0, sends: 1, admissions: 1, overrides: 1 });
+    } finally { globalThis.WebSocket = original; }
+  });
+
+  test("replay stays in split owners and does not buy a fresh request allowance", () => {
+    const dispatch = readFileSync(repoPath("src/server/responses/passthrough-dispatch.ts"), "utf8");
+    const delivery = readFileSync(repoPath("src/server/responses/passthrough-delivery.ts"), "utf8");
+    const chat = readFileSync(repoPath("src/server/chat-native.ts"), "utf8");
+    const core = readFileSync(repoPath("src/server/responses/core.ts"), "utf8");
+    expect(dispatch).toContain("Math.min(1, remainingTransientSendBudget(TRANSIENT_RETRY_MAX_ATTEMPTS))");
+    expect(dispatch).toContain("onSendsConsumed: noteTransientSends");
+    expect(dispatch).toContain("transportState.selectionIsCurrent(transportState.requestBindings.get(request))");
+    expect(delivery).toContain("!isCodexWsUpstreamResponse(upstreamResponse) && !isNonReplayableResponse(upstreamResponse)");
+    expect(delivery).toContain("firstLeg: rawBody");
+    expect(chat).toContain("singleSend ? Math.min(1, remaining) : remaining");
+    expect(chat).toContain("send(activeRequest, \"connection-reset\", true, signal)");
+    expect(chat).toContain("let terminalStatus: number | undefined");
+    expect(core).not.toContain("wrapWithZeroOutputRefetch");
   });
 });

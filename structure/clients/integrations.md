@@ -213,3 +213,5 @@ existing explicit confirmation. The journal endpoint evaluates Undo against the 
 Recovery reads commit history and ownership through strict store methods. Unreadable or malformed
 metadata is uncertainty, never evidence that a transaction did not commit. Pending records validate
 complete ownership, exact Cline paths and result fingerprints before either native file is replaced.
+
+Client configuration writers remain separate from [zero-byte HTTP stream recovery](../transports/streaming-health.md#zero-byte-http-stream-recovery), which changes only an eligible in-flight body reader.

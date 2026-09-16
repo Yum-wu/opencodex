@@ -560,3 +560,12 @@ A hub that serves its own local clients also sets
 [`unauthenticatedLoopbackListener`](#local-clients-that-cannot-receive-the-token). Its port-less
 companion form is what makes a hub a single-port deployment, and it is refused on a loopback or
 wildcard `hostname`, where the public listener already holds `127.0.0.1:<port>`.
+
+## Zero-byte stream recovery
+
+Native Chat and Responses may retry an HTTP request once after response headers if its body fails
+with a connection reset before any raw response byte is read. The extra send uses the remaining
+request allowance and the current credential; cancellation, partial output, clean EOF and
+already-sent WebSocket exchanges do not trigger it. A replacement must preserve the stream
+format. Zero observed bytes do not guarantee the provider did no work, so a replay may be billable.
+This is separate from the `emptyCompletionRetry` setting.

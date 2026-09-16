@@ -8,8 +8,9 @@
  * a caught error here means no response was ever received.
  *
  * Deliberately narrow: timeouts, aborts, ECONNREFUSED/DNS/TLS failures, and HTTP error
- * statuses (returned as Response, never thrown) are NOT retried. Mid-stream SSE resets are
- * out of scope — the response has already resolved by then.
+ * statuses (returned as Response, never thrown) are NOT retried by the reset-only helper.
+ * The separate zero-byte body wrapper below permits one HTTP replacement through its
+ * caller's existing send budget; partial output and sent WebSocket exchanges never replay.
  *
  * MUST stay a leaf module: imports nothing from server.ts or adapters (kiro-retry imports
  * the shared abort helpers from here).
@@ -596,130 +597,151 @@ export async function fetchWithTransientRetry(
   }
 }
 
-/**
- * Refetch an upstream request ONCE after a mid-stream socket reset that
- * happened before the caller consumed any response bytes.
- *
- * `fetchWithResetRetry` / `fetchWithTransientRetry` only cover pre-stream
- * failures — `fetch()` rejecting before response headers. Once headers arrive
- * and the caller starts reading the SSE body, a mid-stream reset (Cloudflare
- * closing an idle keep-alive connection while Bun's pool reuses the half-closed
- * socket) surfaces as a ReadableStream read() rejection, outside every
- * pre-stream retry wrapper. The turn then dies with a terminal
- * `response.failed / upstream_reset` even though nothing was relayed to the
- * client.
- *
- * This helper closes that gap for the one case where a replay is provably safe:
- * zero bytes consumed and no protocol terminal seen. `doFetch` must be
- * replay-safe (string body, same contract as {@link ReplayableFetch}); the
- * replacement send goes out with the connection-reset recovery init
- * (`Connection: close` + `keepalive: false`) so the fresh connection never
- * reuses the pooled half-closed socket. Exactly one replacement send, no
- * backoff — the pre-stream layers already spent their retry budget reaching
- * the first headers.
- *
- * Returns null (and the caller keeps its existing fail-closed tail) when the
- * error is not a reset shape, the caller signal is aborted, the refetch itself
- * throws, or the replacement is not successful (non-2xx) or has no body.
- * Callers must not retry the returned response's body.
- */
+export type ZeroOutputReplayFetch = (
+  recovery?: UpstreamSendRecovery,
+  signal?: AbortSignal,
+) => Promise<Response>;
+
+export interface ZeroOutputRefetchOptions extends ResetRetryOptions {
+  /** The replacement must match the response contract already sent to the client. */
+  acceptResponse?: (response: Response) => boolean;
+  /** Release retained request material when no further replay is possible. */
+  onReplayUnavailable?: () => void;
+}
+
+/** One replacement attempt; the caller retains physical-send admission and accounting. */
 export async function refetchOnZeroOutputReset(
-  doFetch: ReplayableFetch,
+  doFetch: ZeroOutputReplayFetch,
   err: unknown,
-  opts: ResetRetryOptions = {},
+  opts: ZeroOutputRefetchOptions = {},
 ): Promise<Response | null> {
-  if (!isConnectionResetError(err)) return null;
-  if (opts.abortSignal?.aborted) return null;
+  if (!isConnectionResetError(err) || opts.abortSignal?.aborted || opts.attempts === 0) return null;
+  const label = opts.label
+    ? " (" + redactSecretString(opts.label).replace(/[\r\n\u0000-\u001f\u007f]/g, "").slice(0, 128) + ")"
+    : "";
   let replacement: Response;
   try {
-    replacement = await doFetch("connection-reset");
-  } catch (retryErr) {
-    // The replacement rejection may carry provider-returned text (URLs, headers,
-    // tokens) in its message; redact before it reaches the log.
-    const detail = retryErr instanceof Error ? retryErr.message : String(retryErr);
-    console.warn(
-      `[upstream-retry] zero-output reset${opts.label ? ` (${opts.label})` : ""} — refetch failed: ${redactSecretString(detail)}`,
-    );
+    replacement = await doFetch("connection-reset", opts.abortSignal);
+  } catch {
+    console.warn("[upstream-retry] zero-output refetch failed" + label + "; preserving original stream error");
     return null;
   }
-  // A non-success replacement (401/429/5xx/redirect) with a body must NOT be
-  // relayed as stream data: the caller keeps the original 200 response status,
-  // so a 503 body would surface as a malformed "successful" SSE stream. Treat
-  // any non-ok replacement as a failed refetch and preserve the original error.
-  if (!replacement.ok || !replacement.body) {
-    console.warn(
-      `[upstream-retry] zero-output reset${opts.label ? ` (${opts.label})` : ""} — refetch returned ${
-        replacement.ok ? "no body" : `non-ok status ${replacement.status}`
-      }, keeping original failure`,
-    );
-    try {
-      replacement.arrayBuffer().catch(() => {});
-    } catch { /* body already unusable; original failure stands */ }
+  const body = replacement.body;
+  let accepted = !opts.abortSignal?.aborted && replacement.ok && body !== null
+    && !replacement.bodyUsed && !body.locked && !isNonReplayableResponse(replacement);
+  try { if (accepted && opts.acceptResponse) accepted = opts.acceptResponse(replacement); }
+  catch { accepted = false; }
+  if (!accepted || opts.abortSignal?.aborted || body?.locked) {
+    // Do not drain an unbounded error/JSON response or await an uncooperative cancellation.
+    try { void body?.cancel().catch(() => {}); } catch { /* already locked or closed */ }
+    console.warn("[upstream-retry] zero-output refetch rejected" + label + "; preserving original stream error");
     return null;
   }
-  console.warn(
-    `[upstream-retry] zero-output reset${opts.label ? ` (${opts.label})` : ""} — refetched on a fresh connection`,
-  );
+  console.warn("[upstream-retry] zero-output mid-stream reset" + label + "; using one replacement stream");
   return replacement;
 }
 
 /**
- * Wrap an upstream SSE body so a mid-stream socket reset before the first byte
- * is consumed transparently swaps in ONE refetched body (see
- * {@link refetchOnZeroOutputReset}). Everything downstream — tee inspection
- * branches, eager or pull relays, SSE parsers — reads the wrapped stream and
- * never observes the first upstream send dying, so no relay needs changes.
- *
- * The gate is deliberately narrow: only a read() rejection matching
- * {@link isConnectionResetError}, with zero bytes read so far, a live caller
- * signal, and a single swap per wrapped stream. Partial-output failures, clean
- * EOF, non-reset errors, and a failed or empty refetch all propagate the
- * ORIGINAL error untouched, preserving every existing fail-closed tail
- * (replaying after emitted tool calls would duplicate side effects).
+ * Recover at most once before the first upstream byte. Zero observed bytes do not prove
+ * the origin performed no work; replay can still be billable. EOF and partial output never retry.
  */
 export function wrapWithZeroOutputRefetch(
   body: ReadableStream<Uint8Array>,
-  doFetch: ReplayableFetch,
-  opts: ResetRetryOptions = {},
+  doFetch: ZeroOutputReplayFetch,
+  opts: ZeroOutputRefetchOptions = {},
 ): ReadableStream<Uint8Array> {
+  const { abortSignal, label, acceptResponse } = opts;
+  const replayAbort = new AbortController();
   let reader = body.getReader();
+  let replay: ZeroOutputReplayFetch | undefined = opts.attempts === 0 ? undefined : doFetch;
+  let onReplayUnavailable = opts.onReplayUnavailable;
   let bytesRead = 0;
-  let retried = false;
+  let closed = false;
+  let output: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const releaseReplay = (): void => {
+    replay = undefined;
+    const release = onReplayUnavailable;
+    onReplayUnavailable = undefined;
+    try { release?.(); } catch { /* bookkeeping cannot fail the stream */ }
+  };
+  const retireReader = (target: ReadableStreamDefaultReader<Uint8Array>, reason?: unknown): void => {
+    try { void target.cancel(reason).catch(() => {}); } catch { /* already closed */ }
+    try { target.releaseLock(); } catch { /* already released */ }
+  };
+  const detach = (): void => { abortSignal?.removeEventListener("abort", onAbort); };
+  const onAbort = (): void => {
+    if (closed) return;
+    closed = true;
+    const reason = abortSignal?.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    replayAbort.abort(reason);
+    releaseReplay();
+    detach();
+    retireReader(reader, reason);
+    output?.error(reason);
+    output = undefined;
+  };
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      output = controller;
+      abortSignal?.addEventListener("abort", onAbort, { once: true });
+      if (abortSignal?.aborted) onAbort();
+    },
     async pull(controller) {
-      for (;;) {
+      while (!closed) {
+        const current = reader;
         try {
-          const { done, value } = await reader.read();
+          const { done, value } = await current.read();
+          if (closed) return;
           if (done) {
+            closed = true;
+            releaseReplay();
+            detach();
+            current.releaseLock();
             controller.close();
+            output = undefined;
             return;
           }
           bytesRead += value.byteLength;
+          if (bytesRead > 0) releaseReplay();
           controller.enqueue(value);
           return;
         } catch (err) {
-          if (!retried && bytesRead === 0 && !opts.abortSignal?.aborted) {
-            retried = true;
-            const replacement = await refetchOnZeroOutputReset(doFetch, err, opts);
+          if (closed) return;
+          const refetch = replay;
+          if (refetch && bytesRead === 0 && !replayAbort.signal.aborted && isConnectionResetError(err)) {
+            replay = undefined;
+            retireReader(current, err);
+            const replacement = await refetchOnZeroOutputReset(refetch, err, {
+              abortSignal: replayAbort.signal, label, acceptResponse,
+            });
+            releaseReplay();
+            if (closed || replayAbort.signal.aborted) {
+              try { void replacement?.body?.cancel().catch(() => {}); } catch { /* best effort */ }
+              return;
+            }
             if (replacement?.body) {
-              try {
-                reader.cancel().catch(() => {});
-              } catch { /* broken reader; the refetch won */ }
               reader = replacement.body.getReader();
               continue;
             }
           }
-          try {
-            controller.error(err);
-          } catch { /* already torn down */ }
+          closed = true;
+          releaseReplay();
+          detach();
+          retireReader(current, err);
+          controller.error(err);
+          output = undefined;
           return;
         }
       }
     },
     cancel(reason) {
-      try {
-        reader.cancel(reason).catch(() => {});
-      } catch { /* already torn down */ }
+      if (closed) return;
+      closed = true;
+      replayAbort.abort(reason);
+      releaseReplay();
+      detach();
+      retireReader(reader, reason);
+      output = undefined;
     },
-  });
+  }, { highWaterMark: 0 });
 }

@@ -183,3 +183,5 @@ implement legacy call/result pairing. Modern tool-image carriers are unchanged.
 raw passthrough; `tests/responses/chat-media-translation.test.ts` reaches the real HTTP
 translation boundary and verifies that rejection sends no upstream request.
 Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
+
+[Zero-byte HTTP recovery](../transports/streaming-health.md#zero-byte-http-stream-recovery) does not resolve another adapter; it reuses the current physical-send boundary and validates the existing credential binding.

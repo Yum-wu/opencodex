@@ -593,11 +593,12 @@ with the same item id. The batch/non-streaming bridge follows the same rule.
 (Cloudflare closes idle connections; Bun's fetch reuses the dead socket and rejects with
 `ECONNRESET` before any response bytes). `fetchWithResetRetry` retries only
 connection-reset-shaped rejections (up to 3 total attempts, jittered backoff, warn-logged);
-timeouts, aborts, `ECONNREFUSED`, HTTP error statuses, and mid-stream SSE failures are never
-retried. Guarded paths: the ChatGPT passthrough and generic adapter fetch in
-`src/server/responses.ts`, the vision/web-search sidecars, and the web-search loop's direct-fetch
-fallback. Adapters with their own `fetchResponse` (kiro, cursor, google) keep their own retry
-policies; kiro imports the shared abort/sleep helpers from this module.
+timeouts, aborts, `ECONNREFUSED` and HTTP error statuses are not reset-retried. These helpers
+finish when headers arrive. The separate [zero-byte HTTP stream recovery](streaming-health.md#zero-byte-http-stream-recovery)
+keeps one replacement within existing send accounting and excludes already-sent WebSocket exchanges.
+Guarded fetch paths include `src/server/responses/passthrough-dispatch.ts`,
+`src/server/responses/adapter-dispatch.ts`, vision/web-search sidecars and direct-search fallback.
+Adapters with their own `fetchResponse` keep their own retry policies.
 
 ## Console upload rejection recovery
 

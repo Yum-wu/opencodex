@@ -132,10 +132,12 @@ describe("modelCapabilityFields", () => {
     expect(fields.capabilities.context_length).toBe(200000);
     expect(fields.capabilities.max_output_tokens).toBe(64000);
 
-    // Long-tier input: mirrors the effective long window at the top level matching capabilities.context_length
+    // Long-tier input: mirrors the safe base contextWindow (272k) at the top level so flat-property
+    // clients do not accidentally budget into tiered pricing overrides without seeing the caveat,
+    // while Cursor continues to receive the generous long window (922k) in capabilities.context_length.
     const tiered = modelCapabilityFields({ contextWindow: 272000, longContextWindow: 922000 });
-    expect(tiered.context_window).toBe(922000);
-    expect(tiered.context_length).toBe(922000);
+    expect(tiered.context_window).toBe(272000);
+    expect(tiered.context_length).toBe(272000);
     expect(tiered.capabilities.context_length).toBe(922000);
 
     // Empty or non-positive / unsafe inputs: keys omitted entirely
@@ -215,8 +217,9 @@ describe("raw /v1/models list advertises Cursor local-agent capabilities", () =>
       // Native GPT-5.6: 272k default window, 922k opt-in ceiling → Cursor Context selector.
       expect(solCaps.context_length).toBe(922000);
       expect(solCaps.max_output_tokens).toBe(128_000);
-      expect(sol!.context_window).toBe(922000);
-      expect(sol!.context_length).toBe(922000);
+      // Flat properties mirror the safe base window (272k) for external clients
+      expect(sol!.context_window).toBe(272000);
+      expect(sol!.context_length).toBe(272000);
       expect(sol!.max_output_tokens).toBe(128_000);
       expect(sol!.pricing).toEqual({ overrides: [{ min_prompt_tokens: 272000 }] });
       expect("long_context_threshold_tokens" in sol!).toBe(false);

@@ -40,18 +40,24 @@ describe("transientRetryPolicyFor", () => {
     expect(transientRetryPolicyFor({ ...base, transientRetryOn5xx: { attempts: 5 } })).toEqual({ enabled: true, attempts: 5 });
   });
 
-  test("only key-auth openai-chat qualifies", () => {
+  test("only key-auth openai-chat and openai-responses qualify", () => {
     // The adapter gate is the accepted scope, not an incidental detail: without it any
     // generic key-auth provider would inherit the policy.
-    for (const adapter of ["openai-responses", "anthropic", "google"]) {
+    for (const adapter of ["anthropic", "google"]) {
       expect(transientRetryPolicyFor({ ...base, adapter, transientRetryOn5xx: {} } as unknown as OcxProviderConfig)).toBeNull();
     }
+    // openai-responses also qualifies
+    expect(transientRetryPolicyFor({ ...base, adapter: "openai-responses", transientRetryOn5xx: {} } as unknown as OcxProviderConfig))
+      .toEqual({ enabled: true, attempts: 3 });
+
     // Fail closed on credential shape: OAuth/forward/local are never replayed here.
     for (const authMode of ["oauth", "forward", "local"]) {
       expect(transientRetryPolicyFor({ ...base, authMode, transientRetryOn5xx: {} } as unknown as OcxProviderConfig)).toBeNull();
     }
     // An omitted authMode is the documented key-auth default for custom providers.
     expect(transientRetryPolicyFor({ adapter: "openai-chat", transientRetryOn5xx: {} } as unknown as OcxProviderConfig))
+      .toEqual({ enabled: true, attempts: 3 });
+    expect(transientRetryPolicyFor({ adapter: "openai-responses", transientRetryOn5xx: {} } as unknown as OcxProviderConfig))
       .toEqual({ enabled: true, attempts: 3 });
   });
 });

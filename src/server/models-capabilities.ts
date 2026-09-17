@@ -190,8 +190,10 @@ export function modelCapabilityFields(input: ModelCapabilityInput): ModelCapabil
       ...(supportsVision !== undefined ? { supports_vision: supportsVision } : {}),
       ...(efforts.length > 0 ? { reasoning_effort: [...efforts] } : {}),
     },
-    ...(effectiveContextLength !== undefined
-      ? { context_window: effectiveContextLength, context_length: effectiveContextLength }
+    // For flat-property clients that do not parse Cursor pricing overrides, mirror the safe
+    // base contextLength to avoid unknowingly budgeting into tiered pricing surcharges.
+    ...(contextLength !== undefined
+      ? { context_window: contextLength, context_length: contextLength }
       : {}),
     ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
     ...(hasLongTier ? { pricing: { overrides: [{ min_prompt_tokens: contextLength }] } } : {}),

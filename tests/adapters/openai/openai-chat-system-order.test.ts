@@ -21,7 +21,7 @@ function buildMessages(context: OcxParsedRequest["context"]): Array<Record<strin
 }
 
 describe("openai-chat system message ordering", () => {
-  test("folds interleaved developer reminders into one leading system message", () => {
+  test("preserves developer reminder position as chronological system message on non-native targets", () => {
     const messages = buildMessages({
       systemPrompt: ["base instructions"],
       messages: [
@@ -44,13 +44,14 @@ describe("openai-chat system message ordering", () => {
 
     expect(messages[0]).toEqual({
       role: "system",
-      content: "base instructions\n\nfirst reminder\n\nsecond reminder",
+      content: "base instructions",
     });
-    expect(messages.slice(1).map(message => message.role)).toEqual(["user", "assistant", "user"]);
-    expect(messages.slice(1).some(message => message.role === "system")).toBe(false);
+    expect(messages.map(message => message.role)).toEqual(["system", "user", "system", "assistant", "system", "user"]);
+    expect(messages[2]).toEqual({ role: "system", content: "first reminder" });
+    expect(messages[4]).toEqual({ role: "system", content: "second reminder" });
   });
 
-  test("keeps tool calls and results adjacent when a developer reminder follows the call", () => {
+  test("preserves developer reminders in chronological order around tool calls on non-native targets", () => {
     const messages = buildMessages({
       messages: [
         { role: "user", content: "inspect", timestamp: 0 },
@@ -72,8 +73,8 @@ describe("openai-chat system message ordering", () => {
       ],
     });
 
-    expect(messages[0]).toEqual({ role: "system", content: "remember the policy" });
-    expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool"]);
+    expect(messages.map(message => message.role)).toEqual(["user", "assistant", "system", "tool"]);
+    expect(messages[2]).toEqual({ role: "system", content: "remember the policy" });
     expect(messages[3]).toMatchObject({ role: "tool", tool_call_id: "call_1" });
   });
 
@@ -216,3 +217,4 @@ describe("OpenCode Go DeepSeek chronological system messages", () => {
       .toEqual([{ role: "user", content: "Inspect the synthetic project." }]);
   });
 });
+

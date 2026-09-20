@@ -1071,7 +1071,14 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // devlog/_fin/260807_deepseek_responses_streaming/000_plan.md.
     // Current official streams normally carry a real terminal; retain a narrow grace
     // repair for the historical shape that closes after a complete graph without one.
-    modelResponsesTerminalRepair: { "deepseek-flash": { graceMs: 5_000 }, "deepseek-v4-flash": { graceMs: 5_000 } },
+    // Also covers muse-spark models on OpenCode Go which can close without a terminal
+    // after prolonged reasoning.
+    modelResponsesTerminalRepair: {
+      "deepseek-flash": { graceMs: 5_000 },
+      "deepseek-v4-flash": { graceMs: 5_000 },
+      "muse-spark-1.2-contributor": { graceMs: 5_000 },
+      "muse-spark-1.3-contributor": { graceMs: 5_000 },
+    },
     // DeepSeek's Responses route emits bare UUID item ids, which leave Codex
     // clients stuck on an uncommitted turn (#938). Client-facing only — raw
     // continuation snapshots keep the upstream ids.
@@ -1253,3 +1260,4 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     note: "Serverless Inference subscription API. Live discovery exposes only kimi-k2-instruct because Vultr documents it as the sole tool-calling model.",
   },
 ];
+

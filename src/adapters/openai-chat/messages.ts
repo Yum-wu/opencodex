@@ -123,20 +123,15 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
   const nativeOpenAI = isNativeOpenAIChatTarget(provider);
   // Hoisting a newly appended reminder rewrites the reusable prompt prefix.
   // Keep this compatibility exception on the destination/model tested with OCG.
-  const chronologicalSystem = parsed.modelId === "deepseek-v4.1-flash"
-    && registryEntryForProviderDestination(provider)?.id === "opencode-go";
-  const toolCatalogNudge = shouldInjectNonOpenAIToolCatalogNudge(provider)
-    ? buildNonOpenAIToolCatalogNudgeForTools(context.tools, options.toolChoice)
-    : undefined;
-  const developerSystemParts = nativeOpenAI || chronologicalSystem
-    ? []
-    : context.messages
-      .map(developerSystemText)
-      .filter((part): part is string => part !== undefined && part.length > 0);
-  const systemParts = [
-    ...(context.systemPrompt ?? []),
-    ...developerSystemParts,
-    ...(toolCatalogNudge ? [toolCatalogNudge] : []),
+    // Preserving chronological order on the Chat Completions wire prevents in-conversation
+    // instructions from being moved out of the timeline into the prompt preamble (#5213).
+    const toolCatalogNudge = shouldInjectNonOpenAIToolCatalogNudge(provider)
+      ? buildNonOpenAIToolCatalogNudgeForTools(context.tools, options.toolChoice)
+      : undefined;
+    const systemParts = [
+      ...(context.systemPrompt ?? []),
+      ...(toolCatalogNudge ? [toolCatalogNudge] : []),
+    ];
   ];
   if (systemParts.length > 0) {
     const wireModelId = provider.modelSuffixBracketStrip
@@ -154,7 +149,6 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
         const hasImages = parts?.some(p => p.type === "image") ?? false;
         let chatMsg: Record<string, unknown>;
         if (msg.role === "developer" && !hasImages) {
-          if (!nativeOpenAI && !chronologicalSystem) break;
           const text = typeof msg.content === "string"
             ? msg.content
             : parts!.map(p => (p as OcxTextContent).text).join("");
@@ -344,3 +338,4 @@ export function safeToolName(name: string | undefined): string {
 export function emptyAssistantContent(provider: OcxProviderConfig): string | { type: "text"; text: string }[] {
   return isVolcengineArkPaygChatTarget(provider) ? [{ type: "text", text: "" }] : "";
 }
+

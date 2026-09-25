@@ -15,7 +15,13 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 try { [System.Windows.Forms.Application]::EnableVisualStyles() } catch { $null = $_ }
 
-$script:isZh = [System.Globalization.CultureInfo]::CurrentUICulture.Name -like "zh*"
+# Chinese UI cultures get Chinese tray text; every other locale keeps the English strings. The
+# judgment is a named function so it can be exercised directly instead of only through a live
+# desktop, where a selector that always answered English would still look correct.
+function Test-TrayChineseCulture([string]$CultureName) {
+  return $CultureName -like "zh*"
+}
+$script:isZh = Test-TrayChineseCulture ([System.Globalization.CultureInfo]::CurrentUICulture.Name)
 function Get-TrayText {
   param([string]$En, [string]$Zh)
   if ($script:isZh) { return $Zh }
@@ -470,6 +476,14 @@ function Set-PendingAction([string]$Action, [int]$TimeoutSeconds) {
 function Complete-PendingAction([bool]$Success) {
   if ($null -eq $script:pendingAction) { return }
   $action = $script:pendingAction
+  # The pending value stays English because it is compared against the labels the click
+  # handlers set; only the text a user reads is localized.
+  $displayAction = switch ($action) {
+    "Start Proxy" { Get-TrayText "Start Proxy" "启动代理" }
+    "Stop Proxy" { Get-TrayText "Stop Proxy" "停止代理" }
+    "Restart Proxy" { Get-TrayText "Restart Proxy" "重启代理" }
+    default { $action }
+  }
   $script:pendingAction = $null
   if ($null -ne $script:pendingProcess) {
     try {
@@ -481,10 +495,10 @@ function Complete-PendingAction([bool]$Success) {
   }
   if ($Success) {
     Write-ActionLog "$action completed (port=$($script:port), pid=$($script:proxyPid))"
-    $notify.ShowBalloonTip(2500, "opencodex", (Get-TrayText "$action completed." "$action 已完成。"), [System.Windows.Forms.ToolTipIcon]::Info)
+    $notify.ShowBalloonTip(2500, "opencodex", (Get-TrayText "$displayAction completed." "$displayAction 已完成。"), [System.Windows.Forms.ToolTipIcon]::Info)
   } else {
     Write-ActionLog "$action failed to reach the expected state"
-    $notify.ShowBalloonTip(5000, (Get-TrayText "opencodex action failed" "opencodex 操作失败"), (Get-TrayText "$action did not reach the expected state. Open the logs folder or run ocx doctor." "$action 未达到预期状态。打开日志文件夹或运行 ocx doctor。"), [System.Windows.Forms.ToolTipIcon]::Error)
+    $notify.ShowBalloonTip(5000, (Get-TrayText "opencodex action failed" "opencodex 操作失败"), (Get-TrayText "$displayAction did not reach the expected state. Open the logs folder or run ocx doctor." "$displayAction 未达到预期状态。打开日志文件夹或运行 ocx doctor。"), [System.Windows.Forms.ToolTipIcon]::Error)
   }
 }
 

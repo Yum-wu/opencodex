@@ -885,14 +885,53 @@ describe("Windows tray packaging and command safety", () => {
     expect(parseWindowsTrayRunValue(asUtf8, runValue)).not.toBe(command);
   });
 
-  test("tray script defines Get-TrayText and includes Chinese localization mappings", () => {
-    const scriptPath = repoPath("src/tray/windows-tray.ps1");
-    const scriptContent = readFileSync(scriptPath, "utf8");
-    expect(scriptContent).toContain("function Get-TrayText");
-    expect(scriptContent).toContain("打开面板");
-    expect(scriptContent).toContain("启动代理");
-    expect(scriptContent).toContain("重启代理");
-    expect(scriptContent).toContain("退出托盘");
+  // Behavioral proof for the locale selection: the driver loads the REAL
+  // Test-TrayChineseCulture / Get-TrayText out of windows-tray.ps1 (via the PowerShell AST, so
+  // comment and whitespace edits cannot fake it) and reports what each culture actually renders.
+  // A selector that always answered English would pass a source-text check and fail here.
+  test("tray text follows the UI culture for both the Chinese and the default path", () => {
+    if (process.platform !== "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "ocx-tray-i18n-"));
+    try {
+      const resultPath = join(root, "result.json");
+      const run = Bun.spawnSync([
+        windowsPowerShellPath(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", helperPath("windows-tray-i18n-driver.ps1"),
+        "-TrayScriptPath", repoPath("src", "tray", "windows-tray.ps1"),
+        "-ResultPath", resultPath,
+      ], { stdout: "pipe", stderr: "pipe" });
+      expect(run.exitCode, run.stderr.toString()).toBe(0);
+      const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+        cultureDecisions: Record<string, boolean>;
+        rendered: Record<string, Record<string, string>>;
+      };
+      expect(result.cultureDecisions).toEqual({
+        "zh-CN": true, "zh-TW": true, "zh-Hans": true, "en-US": false, "ja-JP": false, "": false,
+      });
+      expect(result.rendered.zh).toEqual({
+        open: "打开面板",
+        start: "启动代理",
+        restart: "重启代理",
+        exit: "退出托盘",
+        status: "opencodex: 在线",
+      });
+      expect(result.rendered.en).toEqual({
+        open: "Open Dashboard",
+        start: "Start Proxy",
+        restart: "Restart Proxy",
+        exit: "Exit Tray",
+        status: "opencodex: Online",
+      });
+    } finally {
+      removeTreeWithRetry(root);
+    }
+  });
+
+  test("a completion notification localizes the action label it reports", () => {
+    const scriptContent = readFileSync(repoPath("src", "tray", "windows-tray.ps1"), "utf8");
+    // The pending value stays English for state comparisons; the notification must not use it.
+    expect(scriptContent).toContain('$displayAction = switch ($action)');
+    expect(scriptContent).not.toContain('(Get-TrayText "$action completed."');
   });
 });
 import { ManagementRequest as Request } from "../helpers/management-auth";

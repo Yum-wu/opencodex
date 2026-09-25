@@ -884,5 +884,13 @@ describe("Windows tray packaging and command safety", () => {
     const asUtf8 = Buffer.from(cp1252).toString("utf8");
     expect(parseWindowsTrayRunValue(asUtf8, runValue)).not.toBe(command);
   });
+
+  test("tray script defines Read-OcxApiToken and forwards x-opencodex-api-key header", () => {
+    const scriptPath = repoPath("src/tray/windows-tray.ps1");
+    const scriptContent = readFileSync(scriptPath, "utf8");
+    expect(scriptContent).toContain("function Read-OcxApiToken");
+    expect(scriptContent).toContain('$request.Headers["x-opencodex-api-key"] = $ApiKey');
+    expect(scriptContent).toContain("Read-JsonUrl");
+  });
 });
 import { ManagementRequest as Request } from "../helpers/management-auth";

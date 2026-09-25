@@ -376,11 +376,27 @@ function Read-ListenTarget {
   return @{ port = 10100; host = "127.0.0.1"; pid = $null }
 }
 
-function Read-JsonUrl([string]$Url) {
+function Read-OcxApiToken {
+  foreach ($tokenName in @("service-api-token", "admin-api-token")) {
+    $tokenPath = Join-Path $OpenCodexHome $tokenName
+    if ([System.IO.File]::Exists($tokenPath)) {
+      try {
+        $token = ([System.IO.File]::ReadAllText($tokenPath)).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($token)) { return $token }
+      } catch { }
+    }
+  }
+  return $null
+}
+
+function Read-JsonUrl([string]$Url, [string]$ApiKey = $null) {
   $request = [System.Net.HttpWebRequest]::Create($Url)
   $request.Method = "GET"
   $request.Timeout = 700
   $request.ReadWriteTimeout = 700
+  if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
+    $request.Headers["x-opencodex-api-key"] = $ApiKey
+  }
   $response = $request.GetResponse()
   try {
     $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
@@ -486,7 +502,8 @@ function Update-TrayState {
   $script:port = [int]$target.port
   $health = $null
   $origin = "http://$($target.host):$($script:port)"
-  try { $health = Read-JsonUrl "$origin/healthz" } catch { }
+  $token = Read-OcxApiToken
+  try { $health = Read-JsonUrl "$origin/healthz" $token } catch { }
   $pidMatches = $null -eq $target.pid -or [int]$target.pid -eq [int]$health.pid
   $script:online = $null -ne $health -and $health.status -eq "ok" -and $health.service -eq "opencodex" -and [int]$health.port -eq $script:port -and $pidMatches
   $script:proxyPid = if ($script:online) { [int]$health.pid } else { $null }

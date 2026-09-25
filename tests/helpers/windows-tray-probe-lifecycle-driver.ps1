@@ -49,6 +49,7 @@ $wanted = @(
   "Start-UpdateBadgeProbe",
   "Maintain-UpdateBadgeProbe",
   "Read-ListenTarget",
+  "Read-OcxApiToken",
   "Read-JsonUrl",
   "Update-TrayState"
 )

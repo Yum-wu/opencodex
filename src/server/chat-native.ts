@@ -38,6 +38,7 @@ import {
   UpstreamRetryEvidenceError,
   type UpstreamSendRecovery,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
+  wrapWithZeroOutputRefetch,
 } from "../lib/upstream-retry";
 import {
   isTranslatorBudgetExceededError,
@@ -368,7 +369,7 @@ export async function runNativeChatAttempt(
   );
   const transientSendAvailable = (): boolean => remainingTransientSends() > 0;
 
-  const send = async (request: AdapterRequest, recovery?: "rate-limit-429" | "key-429"): Promise<Response> => {
+  const send = async (request: AdapterRequest, recovery?: "rate-limit-429" | "key-429" | UpstreamSendRecovery): Promise<Response> => {
     try {
       // #2643: opted-in key-auth openai-chat providers retry pre-stream transient statuses on
       // the native chat lane too; everyone else keeps reset-only semantics.
@@ -380,13 +381,15 @@ export async function runNativeChatAttempt(
       const fetchWithPolicy = requestTransientPolicy ? fetchWithTransientRetry : fetchWithResetRetry;
       return await fetchWithPolicy(
         (transportRecovery?: UpstreamSendRecovery) => {
+          const effectiveRecovery = transportRecovery
+            ?? (recovery === "connection-reset" ? "connection-reset" : undefined);
           return fetchWithHeaderTimeout(
             request.url,
             applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
               body: request.body,
-            }, transportRecovery),
+            }, effectiveRecovery),
             upstream.signal,
             connectMs,
             requestedStream,
@@ -629,7 +632,12 @@ export async function runNativeChatAttempt(
   if (contentType.includes("text/event-stream") && response.body) {
     if (requestedStream) transferTurnToStream();
     let terminalStatus: number | undefined;
-    const stream = nativeChatSse(response.body, {
+    const resilientBody = wrapWithZeroOutputRefetch(
+      response.body,
+      recovery => send(activeRequest, recovery),
+      { abortSignal: upstream.signal, label: safeHostLabel(activeRequest.url) },
+    );
+    const stream = nativeChatSse(resilientBody, {
       requestedModel,
       translatorBudget,
       signal: upstream.signal,

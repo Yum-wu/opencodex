@@ -886,10 +886,11 @@ describe("Windows tray packaging and command safety", () => {
   });
 
   // Behavioral proof for the locale selection: the driver loads the REAL
-  // Test-TrayChineseCulture / Get-TrayText out of windows-tray.ps1 (via the PowerShell AST, so
-  // comment and whitespace edits cannot fake it) and reports what each culture actually renders.
-  // A selector that always answered English would pass a source-text check and fail here.
-  test("tray text follows the UI culture for both the Chinese and the default path", () => {
+  // Test-TrayChineseCulture / Get-TrayText / Complete-PendingAction out of windows-tray.ps1 (via
+  // the PowerShell AST, so comment and whitespace edits cannot fake it) and reports what each
+  // culture actually renders and notifies. A selector, or a notification that kept using the
+  // English pending value, would pass a source-text check and fail here.
+  test("tray text and completion notifications follow the UI culture", () => {
     if (process.platform !== "win32") return;
     const root = mkdtempSync(join(tmpdir(), "ocx-tray-i18n-"));
     try {
@@ -904,6 +905,10 @@ describe("Windows tray packaging and command safety", () => {
       const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
         cultureDecisions: Record<string, boolean>;
         rendered: Record<string, Record<string, string>>;
+        notifications: Record<string, Record<string, {
+          ok: { title: string; text: string };
+          fail: { title: string; text: string };
+        }>>;
       };
       expect(result.cultureDecisions).toEqual({
         "zh-CN": true, "zh-TW": true, "zh-Hans": true, "en-US": false, "ja-JP": false, "": false,
@@ -922,16 +927,32 @@ describe("Windows tray packaging and command safety", () => {
         exit: "Exit Tray",
         status: "opencodex: Online",
       });
+
+      // The pending value stays English for state comparisons; the notification a user reads must
+      // not carry it, on either branch.
+      expect(Object.keys(result.notifications.zh)).toEqual(["Start Proxy", "Stop Proxy", "Restart Proxy"]);
+      expect(result.notifications.zh["Start Proxy"]).toEqual({
+        ok: { title: "opencodex", text: "启动代理 已完成。" },
+        fail: {
+          title: "opencodex 操作失败",
+          text: "启动代理 未达到预期状态。打开日志文件夹或运行 ocx doctor。",
+        },
+      });
+      expect(result.notifications.en["Start Proxy"]).toEqual({
+        ok: { title: "opencodex", text: "Start Proxy completed." },
+        fail: {
+          title: "opencodex action failed",
+          text: "Start Proxy did not reach the expected state. Open the logs folder or run ocx doctor.",
+        },
+      });
+      for (const [action, branch] of Object.entries(result.notifications.zh)) {
+        expect(branch.ok.text).not.toContain(action);
+        expect(branch.fail.text).not.toContain(action);
+        expect(branch.fail.title).toBe("opencodex 操作失败");
+      }
     } finally {
       removeTreeWithRetry(root);
     }
-  });
-
-  test("a completion notification localizes the action label it reports", () => {
-    const scriptContent = readFileSync(repoPath("src", "tray", "windows-tray.ps1"), "utf8");
-    // The pending value stays English for state comparisons; the notification must not use it.
-    expect(scriptContent).toContain('$displayAction = switch ($action)');
-    expect(scriptContent).not.toContain('(Get-TrayText "$action completed."');
   });
 });
 import { ManagementRequest as Request } from "../helpers/management-auth";

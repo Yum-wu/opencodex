@@ -884,5 +884,15 @@ describe("Windows tray packaging and command safety", () => {
     const asUtf8 = Buffer.from(cp1252).toString("utf8");
     expect(parseWindowsTrayRunValue(asUtf8, runValue)).not.toBe(command);
   });
+
+  test("tray script defines Get-TrayText and includes Chinese localization mappings", () => {
+    const scriptPath = repoPath("src/tray/windows-tray.ps1");
+    const scriptContent = readFileSync(scriptPath, "utf8");
+    expect(scriptContent).toContain("function Get-TrayText");
+    expect(scriptContent).toContain("打开面板");
+    expect(scriptContent).toContain("启动代理");
+    expect(scriptContent).toContain("重启代理");
+    expect(scriptContent).toContain("退出托盘");
+  });
 });
 import { ManagementRequest as Request } from "../helpers/management-auth";

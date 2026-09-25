@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../src/config";
@@ -20,17 +21,25 @@ let testDir = "";
 let isolatedCodexHome: IsolatedCodexHome | null = null;
 let activeServer: ReturnType<typeof startServer> | undefined;
 let activeUpstream: ReturnType<typeof Bun.serve> | undefined;
+let activeRawUpstream: ReturnType<typeof createServer> | undefined;
 let stopping: Promise<void> | undefined;
 function stopFixtureServers(): Promise<void> {
   // A timed-out body and its afterEach join one owner instead of racing two stops.
   return stopping ??= (async () => {
     try { await activeServer?.stop(true); }
-    finally { await activeUpstream?.stop(true); }
+    finally {
+      await activeUpstream?.stop(true);
+      if (activeRawUpstream) {
+        const raw = activeRawUpstream;
+        await new Promise<void>(resolve => raw.close(() => resolve()));
+      }
+    }
   })();
 }
 beforeEach(() => {
   activeServer = undefined;
   activeUpstream = undefined;
+  activeRawUpstream = undefined;
   stopping = undefined;
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-chat-spend-");
@@ -162,6 +171,112 @@ test("native Chat includes tool definitions in its pre-dispatch spend reservatio
     expect(response.status).toBe(429);
     expect(response.headers.get("x-opencodex-local-refusal")).toBe("workflow_spend_exhausted");
     expect(upstream.captured).toHaveLength(0);
+  } finally {
+    await stopFixtureServers();
+  }
+});
+
+/**
+ * A raw TCP upstream, because `Bun.serve` turns a body error into a CLEAN EOF: the client would
+ * read an empty 200 instead of the reset under test. Only a real socket close after the head
+ * produces the `ECONNRESET` the zero-output wrapper is built for, so the fixture writes the head
+ * by hand and destroys the socket before the first chunk.
+ */
+async function mockResettingChatUpstream(): Promise<{ baseUrl: string; sends: () => number }> {
+  let sends = 0;
+  const server = createServer(socket => {
+    let buffered = Buffer.alloc(0);
+    socket.on("error", () => {});
+    socket.on("data", chunk => {
+      buffered = Buffer.concat([buffered, chunk]);
+      const headerEnd = buffered.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const headers = buffered.subarray(0, headerEnd).toString("latin1");
+      const declared = /content-length:\s*(\d+)/i.exec(headers);
+      if (buffered.length < headerEnd + 4 + (declared ? Number(declared[1]) : 0)) return;
+      sends += 1;
+      if (sends === 1) {
+        // A real 200 head, chunked, then a hard close before the first chunk: the head is
+        // genuine and the body never carried a byte, which is the stage under test.
+        socket.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      const body = recoveredChatFrames();
+      socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+    });
+  });
+  activeRawUpstream = server;
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as { port: number };
+  return { baseUrl: `http://127.0.0.1:${address.port}/v1`, sends: () => sends };
+}
+
+function recoveredChatFrames(): string {
+  return [
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: "Recovered" } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2 } })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+}
+
+async function postStreamingChat(
+  server: ReturnType<typeof startServer>,
+  extra: Record<string, unknown> = {},
+): Promise<{ status: number; text: string }> {
+  const response = await fetch(new URL("/v1/chat/completions", server.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "mock/test-model",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+      ...extra,
+    }),
+  });
+  return { status: response.status, text: await response.text() };
+}
+
+test("native Chat replaces a zero-output mid-stream reset exactly once under the operator opt-in", async () => {
+  const upstream = await mockResettingChatUpstream();
+  saveConfig(mockConfig(upstream.baseUrl, { retryOnReset: {} }));
+  const server = startServer(0);
+  activeServer = server;
+  try {
+    const { status, text } = await postStreamingChat(server);
+    expect(status).toBe(200);
+    expect(text).toContain("Recovered");
+    // The allowance buys ONE replacement send, not one more retry ladder.
+    expect(upstream.sends()).toBe(2);
+  } finally {
+    await stopFixtureServers();
+  }
+});
+
+test("native Chat leaves a zero-output mid-stream reset alone without the operator opt-in", async () => {
+  const upstream = await mockResettingChatUpstream();
+  saveConfig(mockConfig(upstream.baseUrl));
+  const server = startServer(0);
+  activeServer = server;
+  try {
+    const { text } = await postStreamingChat(server);
+    expect(upstream.sends()).toBe(1);
+    expect(text).not.toContain("Recovered");
+  } finally {
+    await stopFixtureServers();
+  }
+});
+
+test("native Chat refuses the replacement when the body cannot be replayed", async () => {
+  const upstream = await mockResettingChatUpstream();
+  // `store: true` records a second completion, so a second send would do more than re-infer.
+  saveConfig(mockConfig(upstream.baseUrl, { retryOnReset: {} }));
+  const server = startServer(0);
+  activeServer = server;
+  try {
+    const { text } = await postStreamingChat(server, { store: true });
+    expect(upstream.sends()).toBe(1);
+    expect(text).not.toContain("Recovered");
   } finally {
     await stopFixtureServers();
   }

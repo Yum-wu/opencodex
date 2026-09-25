@@ -847,64 +847,27 @@ export async function refetchAfterProtocolSafeReset(
     console.warn("[upstream-retry] protocol-safe refetch rejected" + label + "; preserving original stream error");
     return null;
   }
-  console.warn("[upstream-retry] pre-output Responses reset" + label + "; using one replacement stream");
+  console.warn("[upstream-retry] pre-output stream reset" + label + "; using one replacement stream");
   return replacement;
 }
 
-export type ReplayableFetch = (recovery?: UpstreamSendRecovery) => Promise<Response>;
-
-export interface ZeroOutputResetRefetchOptions extends ResetRetryOptions {
-  headerTimeoutMs?: number;
-}
-
 /**
- * Mid-stream counterpart of fetchWithResetRetry for streaming responses.
- * Exactly ONE replacement send. Replay-safe only when ZERO bytes were consumed by the reader.
- */
-export async function refetchOnZeroOutputReset(
-  doFetch: ReplayableFetch,
-  err: unknown,
-  opts: ZeroOutputResetRefetchOptions = {},
-): Promise<Response | null> {
-  if (!isConnectionResetError(err) || opts.abortSignal?.aborted) return null;
-  const label = opts.label
-    ? " (" + redactSecretString(opts.label).replace(/[\r\n\u0000-\u001f\u007f]/g, "").slice(0, 128) + ")"
-    : "";
-  let replacement: Response;
-  try {
-    replacement = await doFetch("connection-reset");
-  } catch (retryErr) {
-    console.warn(
-      `[upstream-retry] zero-output reset${label} — refetch failed: ${
-        retryErr instanceof Error ? retryErr.message : String(retryErr)
-      }`,
-    );
-    return null;
-  }
-  const body = replacement.body;
-  if (!replacement.ok || !body || replacement.bodyUsed || body.locked || isNonReplayableResponse(replacement)) {
-    console.warn(
-      `[upstream-retry] zero-output reset${label} — refetch returned ${
-        !replacement.ok ? `status ${replacement.status}` : "unusable body"
-      }, keeping original failure`,
-    );
-    try { void body?.cancel().catch(() => {}); } catch { /* ignore */ }
-    return null;
-  }
-  console.warn(`[upstream-retry] zero-output reset${label} — refetched on a fresh connection`);
-  return replacement;
-}
-
-export type ZeroOutputRefetchStreamOptions = ResetRetryOptions;
-
-/**
- * Wrap an SSE body ReadableStream so a mid-stream socket reset occurring before the first byte
- * is consumed by the downstream reader transparently swaps in ONE refetched body on a fresh connection.
+ * Wrap a streamed body so a reset that arrives before the downstream reader has consumed a single
+ * byte swaps in ONE replacement body.
+ *
+ * The zero-byte gate is the whole reason this wrapper exists: the caller observed nothing, which is
+ * the stage where a replacement may even be considered. Every other question -- whether the operator
+ * granted one, whether the request is replayable, whether the replacement is a fresh unlocked body
+ * that matches the contract already promised to the client -- belongs to
+ * {@link refetchAfterProtocolSafeReset}. Delegating rather than re-deciding is what keeps the chat
+ * lane from drifting away from the one the Responses stream already uses.
+ *
+ * Partial output is never masked: once a byte has reached the caller, the original failure stands.
  */
 export function wrapWithZeroOutputRefetch(
   body: ReadableStream<Uint8Array>,
-  doFetch: ReplayableFetch,
-  opts: ZeroOutputRefetchStreamOptions = {},
+  doFetch: ProtocolSafeRefetch,
+  opts: ProtocolSafeRefetchOptions = {},
 ): ReadableStream<Uint8Array> {
   let reader = body.getReader();
   let bytesRead = 0;
@@ -924,9 +887,9 @@ export function wrapWithZeroOutputRefetch(
         } catch (err) {
           if (!retried && bytesRead === 0 && !opts.abortSignal?.aborted) {
             retried = true;
-            const replacement = await refetchOnZeroOutputReset(doFetch, err, opts);
+            const replacement = await refetchAfterProtocolSafeReset(doFetch, err, opts);
             if (replacement?.body) {
-              try { void reader.cancel().catch(() => {}); } catch { /* broken reader */ }
+              try { void reader.cancel().catch(() => {}); } catch { /* broken reader; the replacement won */ }
               reader = replacement.body.getReader();
               continue;
             }

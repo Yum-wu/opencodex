@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import {
-  refetchOnZeroOutputReset,
-  wrapWithZeroOutputRefetch,
-} from "../../src/lib/upstream-retry";
+import { wrapWithZeroOutputRefetch } from "../../src/lib/upstream-retry";
 
 function resetError(): Error {
   // Shape of Bun's fetch rejection on a stale pooled socket.
@@ -10,6 +7,8 @@ function resetError(): Error {
   (err as Error & { code: string }).code = "ECONNRESET";
   return err;
 }
+
+const encoder = new TextEncoder();
 
 function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   let i = 0;
@@ -40,13 +39,14 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array[]
   return out;
 }
 
-function responseWith(body: ReadableStream<Uint8Array>): Response {
-  return new Response(body);
+function sseResponse(body: ReadableStream<Uint8Array>): Response {
+  return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
 }
 
-function noBodyResponse(): Response {
-  return new Response(null);
-}
+const allow = {
+  authorize: () => true,
+  acceptResponse: (r: Response) => r.headers.get("content-type") === "text/event-stream",
+};
 
 const warnSpies: Array<ReturnType<typeof spyOn>> = [];
 function silenceWarn(): void {
@@ -57,149 +57,122 @@ afterEach(() => {
   for (const spy of warnSpies.splice(0)) spy.mockRestore();
 });
 
-describe("refetchOnZeroOutputReset", () => {
-  test("refetches once on a reset-shaped error with a live signal", async () => {
-    silenceWarn();
-    const calls: string[] = [];
-    const doFetch = async (recovery?: string): Promise<Response> => {
-      calls.push(recovery ?? "none");
-      return responseWith(streamOf([new TextEncoder().encode("replacement")]));
-    };
-    const result = await refetchOnZeroOutputReset(doFetch, resetError(), {});
-    expect(result).not.toBeNull();
-    expect(calls).toEqual(["connection-reset"]);
-  });
-
-  test("returns null for non-reset errors", async () => {
-    let calls = 0;
-    const result = await refetchOnZeroOutputReset(async () => { calls += 1; return responseWith(streamOf([])); }, new Error("something else"), {});
-    expect(result).toBeNull();
-    expect(calls).toBe(0);
-  });
-
-  test("returns null when the caller signal is aborted", async () => {
-    let calls = 0;
-    const controller = new AbortController();
-    controller.abort();
-    const result = await refetchOnZeroOutputReset(
-      async () => { calls += 1; return responseWith(streamOf([])); },
-      resetError(),
-      { abortSignal: controller.signal },
-    );
-    expect(result).toBeNull();
-    expect(calls).toBe(0);
-  });
-
-  test("returns null when the refetch throws", async () => {
-    silenceWarn();
-    const result = await refetchOnZeroOutputReset(
-      async () => { throw new Error("refetch failed"); },
-      resetError(),
-      {},
-    );
-    expect(result).toBeNull();
-  });
-
-  test("returns null when the replacement has no body", async () => {
-    silenceWarn();
-    const result = await refetchOnZeroOutputReset(
-      async () => noBodyResponse(),
-      resetError(),
-      {},
-    );
-    expect(result).toBeNull();
-  });
-});
-
 describe("wrapWithZeroOutputRefetch", () => {
-  test("swaps in the refetched stream on a zero-byte reset", async () => {
+  test("swaps in the replacement stream on a zero-byte reset", async () => {
     silenceWarn();
-    const original = failingStream(resetError());
-    const refetchCalls: string[] = [];
-    const doFetch = async (recovery?: string): Promise<Response> => {
-      refetchCalls.push(recovery ?? "none");
-      return responseWith(streamOf([new TextEncoder().encode("ok")]));
-    };
-    const wrapped = wrapWithZeroOutputRefetch(original, doFetch, {});
+    let calls = 0;
+    const wrapped = wrapWithZeroOutputRefetch(
+      failingStream(resetError()),
+      async () => { calls += 1; return sseResponse(streamOf([encoder.encode("ok")])); },
+      { ...allow, attempts: 1 },
+    );
     const chunks = await collect(wrapped);
     expect(new TextDecoder().decode(chunks[0])).toBe("ok");
-    expect(refetchCalls).toEqual(["connection-reset"]);
+    expect(calls).toBe(1);
+  });
+
+  test("refuses the replacement when the operator granted no allowance", async () => {
+    silenceWarn();
+    let calls = 0;
+    const wrapped = wrapWithZeroOutputRefetch(
+      failingStream(resetError()),
+      async () => { calls += 1; return sseResponse(streamOf([encoder.encode("never")])); },
+      { ...allow, authorize: () => false, attempts: 1 },
+    );
+    await expect(collect(wrapped)).rejects.toThrow(/socket connection was closed/i);
+    expect(calls).toBe(0);
+  });
+
+  test("refuses the replacement when the send budget is spent", async () => {
+    silenceWarn();
+    let calls = 0;
+    const wrapped = wrapWithZeroOutputRefetch(
+      failingStream(resetError()),
+      async () => { calls += 1; return sseResponse(streamOf([encoder.encode("never")])); },
+      { ...allow, attempts: 0 },
+    );
+    await expect(collect(wrapped)).rejects.toThrow(/socket connection was closed/i);
+    expect(calls).toBe(0);
+  });
+
+  test("rejects a replacement that is not the event stream the client was promised", async () => {
+    silenceWarn();
+    const wrapped = wrapWithZeroOutputRefetch(
+      failingStream(resetError()),
+      async () => new Response(streamOf([encoder.encode("{}")]), { headers: { "Content-Type": "application/json" } }),
+      { ...allow, attempts: 1 },
+    );
+    await expect(collect(wrapped)).rejects.toThrow(/socket connection was closed/i);
+  });
+
+  test("rejects a non-OK replacement", async () => {
+    silenceWarn();
+    const wrapped = wrapWithZeroOutputRefetch(
+      failingStream(resetError()),
+      async () => new Response("nope", { status: 502, headers: { "Content-Type": "text/event-stream" } }),
+      { ...allow, attempts: 1 },
+    );
+    await expect(collect(wrapped)).rejects.toThrow(/socket connection was closed/i);
   });
 
   test("does not refetch after bytes were already consumed", async () => {
     silenceWarn();
-    const good = new TextEncoder().encode("partial");
     let delivered = false;
     const stream = new ReadableStream<Uint8Array>({
       pull(controller) {
         if (!delivered) {
           delivered = true;
-          controller.enqueue(good);
+          controller.enqueue(encoder.encode("partial"));
           return;
         }
         controller.error(resetError());
       },
     });
-    let refetchCalls = 0;
-    const doFetch = async (): Promise<Response> => {
-      refetchCalls += 1;
-      return responseWith(streamOf([new TextEncoder().encode("never")]));
-    };
-    const wrapped = wrapWithZeroOutputRefetch(stream, doFetch, {});
-    const reader = wrapped.getReader();
-    const first = await reader.read();
-    // Partial output was delivered, then the original error propagated: the
-    // wrapper must NOT mask a partial-output failure with a replay.
-    expect(new TextDecoder().decode(first.value)).toBe("partial");
-    await expect(reader.read()).rejects.toThrow(/socket connection was closed/i);
-    expect(refetchCalls).toBe(0);
-  });
-
-  test("propagates the original error on a non-reset failure", async () => {
-    let refetchCalls = 0;
+    let calls = 0;
     const wrapped = wrapWithZeroOutputRefetch(
-      failingStream(new Error("boom")),
-      async () => { refetchCalls += 1; return responseWith(streamOf([])); },
-      {},
+      stream,
+      async () => { calls += 1; return sseResponse(streamOf([encoder.encode("never")])); },
+      { ...allow, attempts: 1 },
     );
     const reader = wrapped.getReader();
-    await expect(reader.read()).rejects.toThrow("boom");
-    expect(refetchCalls).toBe(0);
+    const first = await reader.read();
+    // Partial output reached the caller, so the original failure must stand: masking it with a
+    // replay would deliver a second turn's bytes after the first turn's.
+    expect(new TextDecoder().decode(first.value)).toBe("partial");
+    await expect(reader.read()).rejects.toThrow(/socket connection was closed/i);
+    expect(calls).toBe(0);
   });
 
-  test("propagates the original error when the refetch itself fails", async () => {
+  test("propagates a non-reset failure without asking for a replacement", async () => {
+    let calls = 0;
+    const wrapped = wrapWithZeroOutputRefetch(
+      failingStream(new Error("boom")),
+      async () => { calls += 1; return sseResponse(streamOf([])); },
+      { ...allow, attempts: 1 },
+    );
+    await expect(collect(wrapped)).rejects.toThrow("boom");
+    expect(calls).toBe(0);
+  });
+
+  test("propagates the original reset when the replacement send itself fails", async () => {
     silenceWarn();
     const wrapped = wrapWithZeroOutputRefetch(
       failingStream(resetError()),
       async () => { throw new Error("refetch failed"); },
-      {},
+      { ...allow, attempts: 1 },
     );
-    const reader = wrapped.getReader();
-    await expect(reader.read()).rejects.toThrow(/socket connection was closed/i);
-  });
-
-  test("propagates the original error when the refetch returns a bodyless response", async () => {
-    silenceWarn();
-    const wrapped = wrapWithZeroOutputRefetch(
-      failingStream(resetError()),
-      async () => noBodyResponse(),
-      {},
-    );
-    const reader = wrapped.getReader();
-    await expect(reader.read()).rejects.toThrow(/socket connection was closed/i);
+    await expect(collect(wrapped)).rejects.toThrow(/socket connection was closed/i);
   });
 
   test("retries at most once: a second zero-byte reset on the replacement propagates", async () => {
     silenceWarn();
-    const replacement = failingStream(resetError());
     let calls = 0;
     const wrapped = wrapWithZeroOutputRefetch(
       failingStream(resetError()),
-      async () => { calls += 1; return responseWith(replacement); },
-      {},
+      async () => { calls += 1; return sseResponse(failingStream(resetError())); },
+      { ...allow, attempts: 2 },
     );
-    const reader = wrapped.getReader();
-    await expect(reader.read()).rejects.toThrow(/socket connection was closed/i);
+    await expect(collect(wrapped)).rejects.toThrow(/socket connection was closed/i);
     expect(calls).toBe(1);
   });
 
@@ -207,13 +180,13 @@ describe("wrapWithZeroOutputRefetch", () => {
     const cancelled: string[] = [];
     const original = new ReadableStream<Uint8Array>({
       pull(controller) {
-        controller.enqueue(new TextEncoder().encode("x"));
+        controller.enqueue(encoder.encode("x"));
       },
       cancel(reason) {
         cancelled.push(String(reason));
       },
     });
-    const wrapped = wrapWithZeroOutputRefetch(original, async () => responseWith(streamOf([])), {});
+    const wrapped = wrapWithZeroOutputRefetch(original, async () => sseResponse(streamOf([])), allow);
     const reader = wrapped.getReader();
     await reader.read();
     await reader.cancel("stop");

@@ -930,25 +930,35 @@ describe("Windows tray packaging and command safety", () => {
 
       // The pending value stays English for state comparisons; the notification a user reads must
       // not carry it, on either branch.
-      expect(Object.keys(result.notifications.zh)).toEqual(["Start Proxy", "Stop Proxy", "Restart Proxy"]);
-      expect(result.notifications.zh["Start Proxy"]).toEqual({
-        ok: { title: "opencodex", text: "启动代理 已完成。" },
-        fail: {
-          title: "opencodex 操作失败",
-          text: "启动代理 未达到预期状态。打开日志文件夹或运行 ocx doctor。",
+      // The pending value stays English for state comparisons; the notification a user reads must
+      // not carry it, on either branch and for every action the tray can run.
+      const expected = {
+        zh: {
+          "Start Proxy": { ok: "启动代理 已完成。", fail: "启动代理 未达到预期状态。打开日志文件夹或运行 ocx doctor。" },
+          "Stop Proxy": { ok: "停止代理 已完成。", fail: "停止代理 未达到预期状态。打开日志文件夹或运行 ocx doctor。" },
+          "Restart Proxy": { ok: "重启代理 已完成。", fail: "重启代理 未达到预期状态。打开日志文件夹或运行 ocx doctor。" },
         },
-      });
-      expect(result.notifications.en["Start Proxy"]).toEqual({
-        ok: { title: "opencodex", text: "Start Proxy completed." },
-        fail: {
-          title: "opencodex action failed",
-          text: "Start Proxy did not reach the expected state. Open the logs folder or run ocx doctor.",
+        en: {
+          "Start Proxy": { ok: "Start Proxy completed.", fail: "Start Proxy did not reach the expected state. Open the logs folder or run ocx doctor." },
+          "Stop Proxy": { ok: "Stop Proxy completed.", fail: "Stop Proxy did not reach the expected state. Open the logs folder or run ocx doctor." },
+          "Restart Proxy": { ok: "Restart Proxy completed.", fail: "Restart Proxy did not reach the expected state. Open the logs folder or run ocx doctor." },
         },
-      });
-      for (const [action, branch] of Object.entries(result.notifications.zh)) {
-        expect(branch.ok.text).not.toContain(action);
-        expect(branch.fail.text).not.toContain(action);
-        expect(branch.fail.title).toBe("opencodex 操作失败");
+      };
+      for (const locale of ["zh", "en"] as const) {
+        expect(Object.keys(result.notifications[locale])).toEqual(["Start Proxy", "Stop Proxy", "Restart Proxy"]);
+        for (const [action, want] of Object.entries(expected[locale])) {
+          expect(result.notifications[locale][action]).toEqual({
+            ok: { title: "opencodex", text: want.ok },
+            fail: {
+              title: locale === "zh" ? "opencodex 操作失败" : "opencodex action failed",
+              text: want.fail,
+            },
+          });
+          if (locale === "zh") {
+            expect(result.notifications.zh[action].ok.text).not.toContain(action);
+            expect(result.notifications.zh[action].fail.text).not.toContain(action);
+          }
+        }
       }
     } finally {
       removeTreeWithRetry(root);

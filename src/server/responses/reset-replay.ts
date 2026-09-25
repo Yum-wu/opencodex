@@ -101,6 +101,11 @@ export function selfContainedChatBody(body: unknown): boolean {
   if (!record(body)) return false;
   if (body.store === true) return false;
   if (body.previous_response_id != null) return false;
+  // Hosted execution requested outside the `tools` catalog. Judged on the inbound body like every
+  // other hazard here, which is conservative for the outbound request by design: a body that asks
+  // for a hosted search is refused rather than assumed harmless because a later stage might drop
+  // the field.
+  if (body.web_search_options !== undefined) return false;
   if (!Array.isArray(body.messages)) return false;
   return body.tools === undefined || clientExecutedChatTools(body.tools, { remaining: MAX_TOOL_ENTRIES });
 }

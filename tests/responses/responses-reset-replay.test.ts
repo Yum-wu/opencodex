@@ -104,6 +104,11 @@ describe("selfContainedChatBody", () => {
     expect(selfContainedChatBody([chatTurn])).toBe(false);
   });
 
+  test("refuses hosted execution requested outside the tool catalog", () => {
+    expect(selfContainedChatBody({ ...chatTurn, web_search_options: {} })).toBe(false);
+    expect(selfContainedChatBody({ ...chatTurn, web_search_options: undefined })).toBe(true);
+  });
+
   test("refuses a catalog carrying a tool the origin would execute", () => {
     for (const tools of [
       [{ type: "web_search" }],

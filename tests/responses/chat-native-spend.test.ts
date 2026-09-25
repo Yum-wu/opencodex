@@ -267,13 +267,44 @@ test("native Chat leaves a zero-output mid-stream reset alone without the operat
   }
 });
 
-test("native Chat refuses the replacement when the body cannot be replayed", async () => {
+test("native Chat refuses the replacement when the tool catalog cannot be replayed", async () => {
   const upstream = await mockResettingChatUpstream();
-  // `store: true` records a second completion, so a second send would do more than re-infer.
   saveConfig(mockConfig(upstream.baseUrl, { retryOnReset: {} }));
   const server = startServer(0);
   activeServer = server;
   try {
+    // A malformed catalog still routes native -- eligibility judges only the Responses-only
+    // fields -- so this is the case that actually reaches selfContainedChatBody.
+    const { text } = await postStreamingChat(server, { tools: "not a list" });
+    expect(upstream.sends()).toBe(1);
+    expect(text).not.toContain("Recovered");
+  } finally {
+    await stopFixtureServers();
+  }
+});
+
+test("native Chat refuses the replacement when the body asks for hosted search", async () => {
+  const upstream = await mockResettingChatUpstream();
+  saveConfig(mockConfig(upstream.baseUrl, { retryOnReset: {} }));
+  const server = startServer(0);
+  activeServer = server;
+  try {
+    const { text } = await postStreamingChat(server, { web_search_options: {} });
+    expect(upstream.sends()).toBe(1);
+    expect(text).not.toContain("Recovered");
+  } finally {
+    await stopFixtureServers();
+  }
+});
+
+test("a store-enabled turn leaves the native lane, so its reset is not replaced", async () => {
+  const upstream = await mockResettingChatUpstream();
+  saveConfig(mockConfig(upstream.baseUrl, { retryOnReset: {} }));
+  const server = startServer(0);
+  activeServer = server;
+  try {
+    // `store: true` is a Responses-only feature, so eligibility declines the native lane before
+    // selfContainedChatBody is consulted. The replacement is the native lane's, so none is made.
     const { text } = await postStreamingChat(server, { store: true });
     expect(upstream.sends()).toBe(1);
     expect(text).not.toContain("Recovered");

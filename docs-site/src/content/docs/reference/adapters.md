@@ -242,6 +242,10 @@ MiMo model Command Code serves.
   maps reasoning effort to a budget (minimal 1024 … max 32000), then computes a safe `max_tokens` with
   output headroom, and **drops `temperature`/`top_p`** when thinking is enabled (Anthropic forbids
   them there).
+- **Adaptive thinking display:** adaptive-thinking models (Opus 4.7+, Sonnet 5, Fable) are asked
+  for `thinking.display: "summarized"`, so a long think reaches Chat and Responses clients as
+  reasoning deltas instead of minutes of heartbeats. A request that hides the reasoning summary
+  (`reasoning.summary: "none"`) keeps the provider default.
 - **Structured output:** Responses `text.format` and Chat Completions `response_format` requests
   with `type: "json_schema"` become Anthropic `output_config.format`. The format merges into an
   existing adaptive-thinking output configuration, preserving a compatible `output_config.effort`.

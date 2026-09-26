@@ -192,6 +192,20 @@ The management quota DTO keeps Combo editing aligned with scoped inference evide
 
 Lite and routing metadata use the same suffix-normalized model object as serialization, including configured bracket-suffix removal.
 
+## Grok Devin pre-output rate limits
+
+For direct Grok Responses requests served by the Devin runTurn adapter,
+`src/server/responses/run-turn-execution.ts` uses `preflightAdapterEvents` before creating the
+streaming Response. A first-event 429 without a replay-unsafe heartbeat becomes an HTTP 429 JSON
+error through the shared error formatter and client Retry-After resolver. The buffered first event
+is replayed for every other outcome. The preflight is bounded by the configured stall timeout,
+including any earlier OAuth failover preflight on this path. On expiry, its pending iterator read is
+handed to SSE replay exactly once; timeout therefore starts a 200 SSE response, and any later 429
+is an SSE failure. Text, reasoning, and tool output commit the stream. This boundary neither retries
+the turn nor changes combo failover policy. Buffered Responses turns apply the same refusal
+formatter to their collected first event after OAuth failover. Other buffered results retain
+the original event list, including output preceding a late error.
+
 ## Optional client transport hints
 
 `dropCodexSafetyBuffering` defaults to false. Canonical OpenAI forward Responses can remove only

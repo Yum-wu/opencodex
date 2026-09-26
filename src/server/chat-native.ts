@@ -674,7 +674,14 @@ export async function runNativeChatAttempt(
       response.body,
       // One physical send, not one more trip through a retry helper: the allowance below buys a
       // single replacement, so the send must not be able to spend more than it granted.
-      () => send(activeRequest, "connection-reset", true),
+      async () => {
+        try {
+          return await send(activeRequest, "connection-reset", true);
+        } finally {
+          // Reselection can charge the rebuilt request after the initial send settled.
+          releaseRetainedRequest();
+        }
+      },
       {
         abortSignal: upstream.signal,
         label: safeHostLabel(activeRequest.url),

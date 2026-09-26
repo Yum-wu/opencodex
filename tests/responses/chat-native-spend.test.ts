@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -15,6 +15,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { resetProviderRequestPacingForTest } from "../../src/providers/request-pacing";
 import { estimateTokens } from "../../src/lib/token-estimate";
 import { getRequestLogEntries } from "../../src/server/request-log";
+import * as stateStores from "../../src/lib/state-store-registrations";
 
 let previousHome: string | undefined;
 let testDir = "";
@@ -182,7 +183,12 @@ test("native Chat includes tool definitions in its pre-dispatch spend reservatio
  * produces the `ECONNRESET` the zero-output wrapper is built for, so the fixture writes the head
  * by hand and destroys the socket before the first chunk.
  */
-async function mockResettingChatUpstream(): Promise<{ baseUrl: string; sends: () => number }> {
+async function mockResettingChatUpstream(
+  opts: {
+    onSend?: (sendIndex: number, headers: string) => void;
+    replacementFrames?: string;
+  } = {},
+): Promise<{ baseUrl: string; sends: () => number }> {
   let sends = 0;
   const server = createServer(socket => {
     let buffered = Buffer.alloc(0);
@@ -195,6 +201,7 @@ async function mockResettingChatUpstream(): Promise<{ baseUrl: string; sends: ()
       const declared = /content-length:\s*(\d+)/i.exec(headers);
       if (buffered.length < headerEnd + 4 + (declared ? Number(declared[1]) : 0)) return;
       sends += 1;
+      opts.onSend?.(sends, headers);
       if (sends === 1) {
         // A real 200 head, chunked, then a hard close before the first chunk: the head is
         // genuine and the body never carried a byte, which is the stage under test.
@@ -202,7 +209,7 @@ async function mockResettingChatUpstream(): Promise<{ baseUrl: string; sends: ()
         socket.destroy();
         return;
       }
-      const body = recoveredChatFrames();
+      const body = opts.replacementFrames ?? recoveredChatFrames();
       socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
     });
   });
@@ -309,6 +316,49 @@ test("a store-enabled turn leaves the native lane, so its reset is not replaced"
     expect(upstream.sends()).toBe(1);
     expect(text).not.toContain("Recovered");
   } finally {
+    await stopFixtureServers();
+  }
+});
+
+test("native Chat releases retained request bytes after key reselection on replacement send", async () => {
+  let liveConfig: OcxConfig | null = null;
+  const realSetLive = stateStores.setLiveStateStoreConfig;
+  const liveSpy = spyOn(stateStores, "setLiveStateStoreConfig").mockImplementation(cfg => {
+    liveConfig = cfg;
+    return realSetLive(cfg);
+  });
+  const seenAuth: string[] = [];
+  const largeDelta = "X".repeat(64 * 1024);
+  const largeFrames = [
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: largeDelta } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 100 } })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+
+  const upstream = await mockResettingChatUpstream({
+    onSend: (sendIndex, headers) => {
+      const auth = /authorization:\s*([^\r\n]+)/i.exec(headers)?.[1]?.trim();
+      if (auth) seenAuth.push(auth);
+      if (sendIndex === 1 && liveConfig?.providers.mock) {
+        liveConfig.providers.mock.apiKey = "k-rotated";
+      }
+    },
+    replacementFrames: largeFrames,
+  });
+
+  saveConfig(mockConfig(upstream.baseUrl, { retryOnReset: {} }));
+  const server = startServer(0);
+  activeServer = server;
+  try {
+    const { status, text } = await postStreamingChat(server, {
+      messages: [{ role: "user", content: "hello ".repeat(500) }],
+    });
+    expect(status).toBe(200);
+    expect(text).toContain(largeDelta);
+    expect(upstream.sends()).toBe(2);
+    expect(seenAuth).toEqual(["Bearer k", "Bearer k-rotated"]);
+  } finally {
+    liveSpy.mockRestore();
     await stopFixtureServers();
   }
 });

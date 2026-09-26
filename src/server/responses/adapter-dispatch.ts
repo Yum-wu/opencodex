@@ -1,4 +1,5 @@
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
+import { isLocalUpstream } from "../../lib/local-upstream";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -184,6 +185,10 @@ export async function prepareAdapterExchange(
   const stallTimeoutMs = typeof config.stallTimeoutSec === "number" && Number.isFinite(config.stallTimeoutSec) && config.stallTimeoutSec > 0
     ? Math.floor(config.stallTimeoutSec * 1000)
     : 300_000;
+  // Where this exchange dials. Local upstreams (loopback / private / `.local` / `.lan`) are
+  // operator-trusted and often CPU-bound, so an unset stall budget resolves to disabled for them.
+  // Key/OAuth rotation re-resolves credentials, never the origin, so the routed baseUrl is stable.
+  const localUpstream = isLocalUpstream(route.provider.baseUrl);
   transportState.activeAdapter = transportState.adapter;
 
   // One immutable, body-safe outbound request per same-target sequence (URL, serialized body,
@@ -1141,6 +1146,7 @@ export async function prepareAdapterExchange(
     cleanupUpstreamAbort,
     connectMs,
     stallTimeoutMs,
+    localUpstream,
     upstreamResponse,
     rateLimitPolicy,
     get rateLimitRetries(): typeof rateLimitRetries {

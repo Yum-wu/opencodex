@@ -62,6 +62,7 @@ import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
+import { isLocalUpstream } from "../lib/local-upstream";
 import { linkAbortSignal } from "./responses";
 import {
   noteProviderAttemptSend,
@@ -694,6 +695,7 @@ export async function runNativeChatAttempt(
       translatorBudget,
       signal: upstream.signal,
       stallTimeoutSec: config.stallTimeoutSec,
+      localUpstream: isLocalUpstream(activeProvider.baseUrl),
       onFirstOutput,
       onUsage: usage => {
         if (!recordKeyWireAttemptUsage(logCtx, usage)) {
